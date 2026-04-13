@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<title>Predictive Maintenance Simulator Control</title>
+<style>
+  body { font-family: monospace; font-size: 13px; margin: 16px; background: #fff; color: #000; }
+  h1 { font-size: 16px; margin-bottom: 4px; }
+  hr { margin: 10px 0; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #999; padding: 4px 8px; text-align: left; }
+  th { background: #eee; }
+  .machines { display: flex; gap: 16px; flex-wrap: wrap; }
+  .machine-box { border: 1px solid #999; padding: 10px; min-width: 220px; }
+  .machine-box h2 { font-size: 14px; margin: 0 0 6px 0; }
+  .status-running { color: green; }
+  .status-warning { color: orange; font-weight: bold; }
+  .status-fault   { color: red; font-weight: bold; }
+  select, button { font-family: monospace; font-size: 12px; padding: 3px 6px; }
+  button { cursor: pointer; margin-right: 4px; }
+  .section { margin-top: 16px; }
+  .log-box { border: 1px solid #999; padding: 8px; height: 150px; overflow-y: auto; font-size: 12px; background: #fafafa; }
+  .log-alert { color: red; }
+  .log-sched { color: green; }
+  progress { width: 100%; height: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Predictive Maintenance Simulator — Control Panel</h1>
+<div>Time: <span id="clock">--:--:--</span> &nbsp;|&nbsp; API: localhost:8000</div>
+<hr>
+
+<div class="machines" id="machineGrid"></div>
+
+<div class="section">
+  <strong>Alert Log</strong> (<span id="alertCount">0</span>)
+  <div class="log-box" id="alertLog">No alerts yet.</div>
+</div>
+
+<div class="section">
+  <strong>Maintenance Schedule</strong> (<span id="schedCount">0</span>)
+  <div class="log-box" id="schedLog">No maintenance scheduled yet.</div>
+</div>
+
+<script>
+const MACHINES = ['CNC_01', 'HYD_02', 'COMP_03', 'CONV_04'];
+const LABELS = { CNC_01: 'CNC Lathe', HYD_02: 'Hydraulic Press', COMP_03: 'Air Compressor', CONV_04: 'Conveyor Belt' };
+const SENSORS = [
+  { key: 'temperature_C',  label: 'Temp',    unit: '°C'   },
+  { key: 'vibration_mm_s', label: 'Vib',     unit: 'mm/s' },
+  { key: 'rpm',            label: 'RPM',     unit: 'rpm'  },
+  { key: 'current_A',      label: 'Current', unit: 'A'    },
+];
+
+let failureModes = {};
+
+async function buildGrid() {
+  try {
+    const res = await fetch('/failure-modes');
+    failureModes = await res.json();
+  } catch(e) {}
+
+  const grid = document.getElementById('machineGrid');
+  grid.innerHTML = '';
+
+  MACHINES.forEach(machineId => {
+    const optionHTML = Object.entries(failureModes).map(([k, v]) =>
+      `<option value="${k}">${v.label}</option>`
+    ).join('');
+
+    const box = document.createElement('div');
+    box.className = 'machine-box';
+    box.id = `card-${machineId}`;
+    box.innerHTML = `
+      <h2>${machineId} — ${LABELS[machineId]}</h2>
+      Status: <span id="status-${machineId}" class="status-running">running</span>
+      <table style="margin-top:6px;">
+        <tr><th>Sensor</th><th>Value</th></tr>
+        ${SENSORS.map(s => `
+          <tr>
+            <td>${s.label} (${s.unit})</td>
+            <td id="val-${machineId}-${s.key}">—</td>
+          </tr>
+        `).join('')}
+      </table>
+      <div id="progress-${machineId}" style="display:none; margin-top:6px; font-size:11px;">
+        Failure: <span id="progress-label-${machineId}">—</span>
+        (<span id="progress-pct-${machineId}">0%</span>)<br>
+        <progress id="progress-bar-${machineId}" value="0" max="100"></progress>
+      </div>
+      <div style="margin-top:8px;">
+        <select id="select-${machineId}">${optionHTML}</select><br style="margin-bottom:4px;">
+        <button onclick="injectFailure('${machineId}')">Inject Failure</button>
+        <button onclick="clearFailure('${machineId}')">Clear</button>
+      </div>
+    `;
+    grid.appendChild(box);
+  });
+}
+
+function startStreams() {
+  MACHINES.forEach(machineId => {
+    const es = new EventSource(`/stream/${machineId}`);
+    es.onmessage = (e) => {
+      try { updateCard(machineId, JSON.parse(e.data)); } catch(err) {}
+    };
+    es.onerror = () => {
+      const el = document.getElementById(`status-${machineId}`);
+      if (el) { el.textContent = 'STREAM ERROR'; el.className = 'status-fault'; }
+    };
+  });
+}
+
+function updateCard(machineId, data) {
+  const badge = document.getElementById(`status-${machineId}`);
+  if (badge) {
+    badge.textContent = data.status;
+    badge.className = `status-${data.status}`;
+  }
+  SENSORS.forEach(s => {
+    const el = document.getElementById(`val-${machineId}-${s.key}`);
+    if (!el || data[s.key] === undefined) return;
+    const v = data[s.key];
+    el.textContent = v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : Math.round(v);
+  });
+}
+
+async function injectFailure(machineId) {
+  const mode = document.getElementById(`select-${machineId}`).value;
+  if (!mode) return;
+  await fetch('/inject-failure', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ machine_id: machineId, failure_mode: mode }),
+  });
+}
+
+async function clearFailure(machineId) {
+  await fetch('/clear-failure', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ machine_id: machineId }),
+  });
+  const pw = document.getElementById(`progress-${machineId}`);
+  if (pw) pw.style.display = 'none';
+}
+
+async function pollStatus() {
+  try {
+    const res = await fetch('/status');
+    const status = await res.json();
+    MACHINES.forEach(m => {
+      const ms = status[m];
+      if (!ms) return;
+      const pw  = document.getElementById(`progress-${m}`);
+      const bar = document.getElementById(`progress-bar-${m}`);
+      const lbl = document.getElementById(`progress-label-${m}`);
+      const pct = document.getElementById(`progress-pct-${m}`);
+      if (ms.failure_mode) {
+        pw.style.display = 'block';
+        const p = Math.round(ms.progress * 100);
+        bar.value = p;
+        lbl.textContent = ms.failure_label;
+        pct.textContent = p + '%';
+      } else {
+        pw.style.display = 'none';
+      }
+    });
+  } catch(e) {}
+}
+
+async function pollLogs() {
+  try {
+    const [ar, sr] = await Promise.all([
+      fetch('/alerts').then(r => r.json()),
+      fetch('/scheduled').then(r => r.json()),
+    ]);
+    document.getElementById('alertCount').textContent = ar.count;
+    document.getElementById('schedCount').textContent = sr.count;
+
+    const alog = document.getElementById('alertLog');
+    alog.innerHTML = ar.alerts.length === 0 ? 'No alerts yet.' :
+      ar.alerts.slice(-20).reverse().map(a =>
+        `<div class="log-alert">[${a.timestamp.slice(11,19)}] ${a.machine_id}: ${a.reason}${a.risk_score != null ? ' [risk:'+a.risk_score+']' : ''}</div>`
+      ).join('');
+
+    const slog = document.getElementById('schedLog');
+    slog.innerHTML = sr.scheduled.length === 0 ? 'No maintenance scheduled yet.' :
+      sr.scheduled.slice(-20).reverse().map(s =>
+        `<div class="log-sched">[${s.booked_at.slice(11,19)}] ${s.machine_id}: slot ${s.slot_start.slice(11,16)} [${s.priority}]</div>`
+      ).join('');
+  } catch(e) {}
+}
+
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toTimeString().slice(0, 8);
+}
+
+async function init() {
+  await buildGrid();
+  startStreams();
+  setInterval(updateClock, 1000);
+  setInterval(pollStatus, 1500);
+  setInterval(pollLogs, 2000);
+  updateClock();
+}
+
+init();
+</script>
+</body>
+</html>
