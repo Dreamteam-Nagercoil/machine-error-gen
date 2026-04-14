@@ -18,7 +18,7 @@ except Exception as e:
     exit()
 
 # Threshold (tune this later)
-ERROR_THRESHOLD = 1.0
+ERROR_THRESHOLD = 2
 
 
 # -----------------------------
