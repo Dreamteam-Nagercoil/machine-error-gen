@@ -2,3 +2,8 @@ fastapi
 uvicorn[standard]
 numpy
 pandas
+requests
+joblib
+jsonlib-python3
+sseclient-py
+scikit-learn
