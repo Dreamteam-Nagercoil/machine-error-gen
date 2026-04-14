@@ -1,8 +1,8 @@
-import requests
-import joblib
 import json
-from sseclient import SSEClient
+
+import joblib
 import pandas as pd
+import requests
 
 # -----------------------------
 # CONFIG
@@ -11,10 +11,15 @@ BASE_URL = "http://localhost:8000"
 machine_id = "CNC_01"
 
 # Load trained model
-model = joblib.load(f"model_{machine_id}.pkl")
+try:
+    model = joblib.load(f"model_{machine_id}.pkl")
+except Exception as e:
+    print(f"❌ Failed to load model: {e}")
+    exit()
 
 # Threshold (tune this later)
 ERROR_THRESHOLD = 1.0
+
 
 # -----------------------------
 # ALERT FUNCTION
@@ -24,7 +29,7 @@ def send_alert(reason, risk_score, data):
         "machine_id": machine_id,
         "reason": reason,
         "risk_score": risk_score,
-        "sensor_values": data
+        "sensor_values": data,
     }
 
     try:
@@ -33,44 +38,67 @@ def send_alert(reason, risk_score, data):
     except Exception as e:
         print("Alert failed:", e)
 
+
 # -----------------------------
 # STREAM PROCESSING
 # -----------------------------
 def run_agent():
     print(f"Connecting to stream for {machine_id}...")
-
     url = f"{BASE_URL}/stream/{machine_id}"
-    client = SSEClient(url)
 
-    for event in client:
-        try:
-            if not event.data:
-                continue
+    try:
+        # We use stream=True to keep the connection open indefinitely
+        # headers={'Accept': 'text/event-stream'} tells the server we want SSE
+        with requests.get(
+            url, stream=True, headers={"Accept": "text/event-stream"}
+        ) as response:
+            if response.status_code != 200:
+                print(f"Failed to connect: {response.status_code}")
+                return
 
-            data = json.loads(event.data)
+            # iter_lines handles the byte-to-string decoding automatically
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
 
-            rpm = data["rpm"]
-            temp = data["temperature_C"]
-            vib = data["vibration_mm_s"]
-            actual_current = data["current_A"]
+                # SSE lines start with "data: "
+                if line.startswith("data:"):
+                    try:
+                        # Extract the JSON part after "data: "
+                        payload_str = line[5:].strip()
+                        if not payload_str:
+                            continue
 
-            # ✅ FIX HERE
-            X = pd.DataFrame([{
-                "rpm": rpm,
-                "temperature_C": temp,
-                "vibration_mm_s": vib
-            }])
+                        data = json.loads(payload_str)
 
-            predicted_current = model.predict(X)[0]
-            error = abs(actual_current - predicted_current)
+                        rpm = data["rpm"]
+                        temp = data["temperature_C"]
+                        vib = data["vibration_mm_s"]
+                        actual_current = data["current_A"]
 
-            print(f"Actual: {actual_current:.2f}, Predicted: {predicted_current:.2f}, Error: {error:.2f}")
+                        # Prepare data for prediction
+                        X = pd.DataFrame(
+                            [{"rpm": rpm, "temperature_C": temp, "vibration_mm_s": vib}]
+                        )
 
-            if error > ERROR_THRESHOLD:
-                print("⚠️ Anomaly detected!")
+                        predicted_current = model.predict(X)[0]
+                        error = abs(actual_current - predicted_current)
 
-        except Exception as e:
-            print("Error:", e)
+                        print(
+                            f"Actual: {actual_current:.2f}, Predicted: {predicted_current:.2f}, Error: {error:.2f}"
+                        )
+
+                        if error > ERROR_THRESHOLD:
+                            print("⚠️ Anomaly detected!")
+                            send_alert("High Current Deviation", error, data)
+
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        print(f"Processing error: {e}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Connection error: {e}")
 
 
 # -----------------------------
